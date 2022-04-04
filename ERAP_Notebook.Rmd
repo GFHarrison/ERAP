@@ -1,0 +1,164 @@
+---
+title: "Ensembl REST Annotation Pipeline (ERAP)"
+output: html_notebook
+---
+
+Use with R version 4.1.3. For annotated pipeline version please see the ReadMe. Navigate to the directory containing your VCF file. Results can be found here. Specify the name of the VCF in vcf_path and the reference to which the VCF was mapped in Reference and press Run. 
+
+```{r}
+# Specify the reference and directory containing the VCF
+# The final table will be places here as well
+vcf_path = paste0(getwd(),"/test_vcf_data.vcf")
+Reference = "grch37"
+
+if (!("reshape2" %in% rownames(installed.packages()))) {
+  install.packages("reshape2")
+}
+if (!("data.table" %in% rownames(installed.packages()))) {
+  install.packages("data.table")
+}
+if (!("dplyr" %in% rownames(installed.packages()))) {
+  install.packages("dplyr")
+}
+if (!("tidyr" %in% rownames(installed.packages()))) {
+  install.packages("tidyr")
+}
+if (!("httr" %in% rownames(installed.packages()))) {
+  install.packages("httr")
+}
+if (!("jsonlite" %in% rownames(installed.packages()))) {
+  install.packages("jsonlite")
+}
+if (!("xml2" %in% rownames(installed.packages()))) {
+  install.packages("xml2")
+}
+if (!("ggplot2" %in% rownames(installed.packages()))) {
+  install.packages("ggplot2")
+}
+
+library(reshape2)
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(httr)
+library(jsonlite)
+library(xml2)
+library(ggplot2)
+
+Features = c("CHROM", "POS", "REF", "ALT", "INFO")
+
+vcf_parser = function(vcf_path, col_of_interest){
+     vcf = fread(vcf_path)
+     colnames(vcf)[1]= "CHROM"
+     ncols <- max(stringr::str_count(vcf$INFO, ";")) + 1
+     vcf_INFO = vcf %>% 
+     dplyr::select(col_of_interest) %>%
+     separate(INFO, paste0("col", 1:ncols), sep= ";") %>%
+     separate(col15, c("name", "Total_Coverage"), sep="=") %>%
+     separate(col18, c("name", "Reads_w_Variant"), sep="=") %>%
+  select(-c("col1","col2", "col3","col4","col5","col6", "col7","col8", "col9", "col10", "col11", "col12", "col13", "col14", "col16", "col17", "col19", "col20", "name"))
+}
+parsed_vcf = vcf_parser(vcf_path, Features)
+
+parsed_vcf$Percent_Reads_W_Variant = signif(100*(as.numeric(parsed_vcf$Reads_w_Variant) / as.numeric(parsed_vcf$Total_Coverage)), digits=4)
+parsed_vcf$Percent_Reads_W_Reference = signif(100 - as.numeric(parsed_vcf$Percent_Reads_W_Variant), digits=4)
+Multi_Allelic_Sites = parsed_vcf[is.na(parsed_vcf$Percent_Reads_W_Variant),]
+parsed_vcf = parsed_vcf[!is.na(parsed_vcf$Percent_Reads_W_Variant),]
+
+
+CHROM = "chromosome"
+POS = "position"
+id = "missing"
+Gene_Symbol = "missing"
+Impact = "missing"
+BioType = "missing"
+Variant_Severity = "Missing"
+minor_allele_freq = 0
+
+vcf_ensembl_endpoint_cat = as.data.frame(cbind(CHROM, POS, id, Gene_Symbol, Impact, BioType, Variant_Severity, minor_allele_freq))
+
+for (i in 1:nrow(parsed_vcf)) {
+# Build the start frame to add to
+CHROM = "chromosome"
+POS = "position"
+id = 0
+Gene_Symbol = "missing"
+Impact = "missing"
+BioType = "missing"
+Variant_Severity = "Missing"
+minor_allele_freq = 0
+
+vcf_ensembl_endpoint_cat_Interim = as.data.frame(cbind(CHROM, POS, id, Gene_Symbol, Impact, BioType, Variant_Severity, minor_allele_freq))
+
+address = print(paste("https://", Reference, paste(".rest.ensembl.org/vep/human/region/"), parsed_vcf$CHROM[i], paste(":"), parsed_vcf$POS[i], paste(":"),parsed_vcf$POS[i], paste("/"), parsed_vcf$ALT[i], paste("?")), mirror = "uswest")
+address = gsub(" ", "", address) 
+address = gsub(" ", "", address)  
+vcf_ensembl_endpoint <- GET(paste(address,sep = ""), content_type("application/json"))
+vcf_ensembl_endpoint = data.frame(t(sapply(content(vcf_ensembl_endpoint),c)))
+vcf_ensembl_endpoint_cat_Interim$CHROM = parsed_vcf$CHROM[i]
+vcf_ensembl_endpoint_cat_Interim$POS = parsed_vcf$POS[i]
+
+### Loading wanted data:
+vcf_ensembl_endpoint_trans_consequences= data.frame(vcf_ensembl_endpoint$transcript_consequences)
+vcf_ensembl_endpoint_pheno_consequences = data.frame(vcf_ensembl_endpoint$most_severe_consequence)
+vcf_ensembl_endpoint_ID = data.frame(vcf_ensembl_endpoint$id)
+vcf_ensembl_endpoint_colocated = data.frame(vcf_ensembl_endpoint$colocated_variants)
+
+# ID of variant in VCF:
+if (nrow(vcf_ensembl_endpoint_ID) == 0) {
+  vcf_ensembl_endpoint_cat_Interim$id = "missing"
+} else {
+  vcf_ensembl_endpoint_cat_Interim$id = vcf_ensembl_endpoint_ID$id
+}
+
+# Gene Name:
+if (nrow(vcf_ensembl_endpoint_trans_consequences) == 0) {
+  vcf_ensembl_endpoint_cat_Interim$Gene_Symbol = "missing"
+} else if (!"transcript_consequences.gene_symbol" %in% colnames(vcf_ensembl_endpoint_trans_consequences)) {
+  vcf_ensembl_endpoint_cat_Interim$Gene_Symbol = "missing"
+} else {
+  vcf_ensembl_endpoint_cat_Interim$Gene_Symbol = vcf_ensembl_endpoint_trans_consequences$transcript_consequences.gene_symbol
+}
+
+# Impact of variant:
+if (nrow(vcf_ensembl_endpoint_trans_consequences) == 0) {
+  vcf_ensembl_endpoint_cat_Interim$Impact = "missing"
+} else if (!"transcript_consequences.impact" %in% colnames(vcf_ensembl_endpoint_trans_consequences)) {
+  vcf_ensembl_endpoint_cat_Interim$Impact = "missing"
+} else {
+  vcf_ensembl_endpoint_cat_Interim$Impact = vcf_ensembl_endpoint_trans_consequences$transcript_consequences.impact
+}
+
+# BioType of variant:
+if (nrow(vcf_ensembl_endpoint_trans_consequences) == 0) {
+  vcf_ensembl_endpoint_cat_Interim$BioType = "missing"
+} else if (!"transcript_consequences.biotype" %in% colnames(vcf_ensembl_endpoint_trans_consequences)) {
+  vcf_ensembl_endpoint_cat_Interim$BioType = "missing"
+} else {
+  vcf_ensembl_endpoint_cat_Interim$BioType = vcf_ensembl_endpoint_trans_consequences$transcript_consequences.biotype
+}
+
+# Severity of Variant:
+if (nrow(vcf_ensembl_endpoint_pheno_consequences) == 0) {
+  vcf_ensembl_endpoint_cat_Interim$Variant_Severity = "missing"
+} else if (!"most_severe_consequence" %in% colnames(vcf_ensembl_endpoint_pheno_consequences)) {
+  vcf_ensembl_endpoint_cat_Interim$Variant_Severity = "missing"
+} else {
+  vcf_ensembl_endpoint_cat_Interim$Variant_Severity = vcf_ensembl_endpoint_pheno_consequences$most_severe_consequence
+}
+
+# Minor Allele frequency
+if (nrow(vcf_ensembl_endpoint_colocated) == 0) {
+  vcf_ensembl_endpoint_cat_Interim$minor_allele_freq = 0
+} else if (!"colocated_variants.minor_allele_freq" %in% colnames(vcf_ensembl_endpoint_colocated)) {
+  vcf_ensembl_endpoint_cat_Interim$minor_allele_freq = 0
+} else {
+  vcf_ensembl_endpoint_cat_Interim$minor_allele_freq = vcf_ensembl_endpoint_colocated$colocated_variants.minor_allele_freq
+
+}
+  vcf_ensembl_endpoint_cat = rbind(vcf_ensembl_endpoint_cat,vcf_ensembl_endpoint_cat_Interim)
+}
+
+Final_OutPut = merge(vcf_ensembl_endpoint_cat, parsed_vcf, by = c("CHROM", "POS"), all = FALSE)
+write.csv(Final_OutPut, paste0(getwd(),"/ERAP_Annotated_VCF.csv"), quote =F, row.names = F)
+```
